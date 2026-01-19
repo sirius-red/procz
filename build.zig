@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optmize = b.standardOptimizeOption(.{});
 
     const mod = b.addModule("procz", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/procz.zig"),
         .target = target,
         .optimize = optmize,
     });
