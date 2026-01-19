@@ -74,7 +74,7 @@ pub fn forEachProcessInfo(
         const comm_ptr: [*:0]const u8 = @ptrCast(&kp.kp_proc.p_comm[0]);
         const comm = std.mem.span(comm_ptr);
 
-        try callback(context, @intCast(pid_i32), comm);
+        try callback(context, .{ .pid = @intCast(pid_i32), .name = comm });
     }
 }
 
@@ -326,9 +326,37 @@ pub fn userId(allocator: mem.Allocator, pid: u32) !shared.OwnedUserId {
 }
 
 /// Wait for `pid` to exit (not yet supported on macOS in this library).
-pub fn waitProcess(pid: u32) !std.process.Child.Term {
+pub fn waitProcess(pid: u32) !shared.WaitPidResult {
     _ = try toPidT(pid);
-    return Error.UnsupportedFeature;
+    if (!try processExists(pid)) return Error.NotFound;
+
+    const pid_t = try toPidT(pid);
+    var status: if (builtin.link_libc) c_int else u32 = undefined;
+
+    while (true) {
+        const rc = posix.system.waitpid(pid_t, &status, 0);
+        if (rc != -1) {
+            const st: u32 = @bitCast(status);
+            const exited = (st & 0x7f) == 0;
+            const exit_code: ?u32 = if (exited) @intCast((st >> 8) & 0xff) else null;
+            return .{ .exited = true, .exit_code = exit_code };
+        }
+
+        switch (posix.errno(rc)) {
+            .INTR => continue,
+            .CHILD => break, // not a child process of this process
+            else => return Error.Unexpected,
+        }
+    }
+
+    var sleep_ns: u64 = 10 * std.time.ns_per_ms;
+    const max_sleep_ns: u64 = 250 * std.time.ns_per_ms;
+    while (try processExists(pid)) {
+        std.time.sleep(sleep_ns);
+        sleep_ns = @min(max_sleep_ns, sleep_ns * 2);
+    }
+
+    return .{ .exited = true, .exit_code = null };
 }
 
 /// Return resource usage information for `pid`.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const posix = std.posix;
 const shared = @import("shared.zig");
@@ -58,7 +59,7 @@ pub fn forEachProcessInfo(
         var name_slice: []const u8 = "";
         var comm_path_buf: [64]u8 = undefined;
         const comm_path = std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{pid_u32}) catch {
-            try callback(context, pid_u32, name_slice);
+            try callback(context, .{ .pid = pid_u32, .name = name_slice });
             continue;
         };
 
@@ -71,7 +72,7 @@ pub fn forEachProcessInfo(
             }
         }
 
-        try callback(context, pid_u32, name_slice);
+        try callback(context, .{ .pid = pid_u32, .name = name_slice });
     }
 }
 
@@ -301,9 +302,37 @@ pub fn userId(allocator: mem.Allocator, pid: u32) !shared.OwnedUserId {
 }
 
 /// Wait for `pid` to exit (not yet supported on Linux in this library).
-pub fn waitProcess(pid: u32) !std.process.Child.Term {
+pub fn waitProcess(pid: u32) !shared.WaitPidResult {
     if (pid == 0) return Error.InvalidPid;
-    return Error.UnsupportedFeature;
+    if (!try processExists(pid)) return Error.NotFound;
+
+    const pid_t = try toPidT(pid);
+    var status: if (builtin.link_libc) c_int else u32 = undefined;
+
+    while (true) {
+        const rc = posix.system.waitpid(pid_t, &status, 0);
+        if (rc != -1) {
+            const st: u32 = @bitCast(status);
+            const exited = (st & 0x7f) == 0;
+            const exit_code: ?u32 = if (exited) @intCast((st >> 8) & 0xff) else null;
+            return .{ .exited = true, .exit_code = exit_code };
+        }
+
+        switch (posix.errno(rc)) {
+            .INTR => continue,
+            .CHILD => break, // not a child process of this process
+            else => return Error.Unexpected,
+        }
+    }
+
+    var sleep_ns: u64 = 10 * std.time.ns_per_ms;
+    const max_sleep_ns: u64 = 250 * std.time.ns_per_ms;
+    while (try processExists(pid)) {
+        std.time.sleep(sleep_ns);
+        sleep_ns = @min(max_sleep_ns, sleep_ns * 2);
+    }
+
+    return .{ .exited = true, .exit_code = null };
 }
 
 /// Return resource usage information for `pid`.

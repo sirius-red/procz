@@ -1,5 +1,13 @@
 const std = @import("std");
 
+/// Process identity used by enumeration APIs.
+///
+/// Note: `name` is best-effort and may be backed by temporary storage.
+pub const ProcessInfo = struct {
+    pid: u32,
+    name: []const u8,
+};
+
 /// Error set used across all platform backends.
 pub const Error = error{
     UnsupportedOS,
@@ -19,13 +27,10 @@ pub const Error = error{
 
 /// Callback type used by `forEachProcessInfo`-style APIs.
 ///
-/// The callback receives the PID and a process name slice (which may be backed
-/// by temporary storage).
-///
-/// If the process name must outlive the callback, copy it into caller-owned
-/// memory.
+/// The `name` field may be backed by temporary storage; copy it if it must
+/// outlive the callback.
 pub fn ForEachInfoCallback(comptime T: type) type {
-    return fn (ctx: T, pid: u32, name: []const u8) anyerror!void;
+    return fn (ctx: T, info: ProcessInfo) anyerror!void;
 }
 
 /// High-level kill strategy for `KillOptions`.
@@ -80,6 +85,14 @@ pub const OwnedArgv = struct {
         self.arena.deinit();
         self.* = undefined;
     }
+};
+
+/// Normalized result for `waitPid`-style operations.
+///
+/// Note: on POSIX, the exit code is only available for child processes.
+pub const WaitPidResult = struct {
+    exited: bool,
+    exit_code: ?u32,
 };
 
 /// Platform-dependent user identity.

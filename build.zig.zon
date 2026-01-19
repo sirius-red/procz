@@ -1,6 +1,6 @@
 .{
     .name = .procz,
-    .version = "2.0.0",
+    .version = "3.0.0",
     .minimum_zig_version = "0.15.2",
     .paths = .{""},
     .fingerprint = 0x434d539eec618f36,

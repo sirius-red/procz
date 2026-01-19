@@ -33,6 +33,8 @@ pub const UserId = platform.shared.UserId;
 pub const OwnedUserId = platform.shared.OwnedUserId;
 /// Process resource usage and timing information (best-effort).
 pub const ResourceUsage = platform.shared.ResourceUsage;
+/// Normalized result returned by `waitPid`.
+pub const WaitPidResult = platform.shared.WaitPidResult;
 /// Process exit status (same as `std.process.Child.Term`).
 pub const ExitStatus = std.process.Child.Term;
 
@@ -42,8 +44,8 @@ fn validatePid(pid: u32) Error!void {
 
 /// Enumerate process IDs and names for the current operating system.
 ///
-/// The `name` slice passed to `callback` may be backed by temporary storage and
-/// must be copied if it needs to outlive the callback.
+/// The `info.name` slice passed to `callback` may be backed by temporary
+/// storage and must be copied if it needs to outlive the callback.
 ///
 /// Errors: any error returned by the platform backend or by `callback` is
 /// propagated. If the current OS is not supported, this returns
@@ -214,7 +216,12 @@ pub const SpawnOptions = struct {
 };
 
 /// Wait for a PID to exit (platform support varies).
-pub fn waitPid(pid: u32) !ExitStatus {
+/// Wait for `pid` to exit.
+///
+/// On Windows, `exit_code` is typically available.
+/// On Linux/macOS, `exit_code` is only available for child processes;
+/// non-child PIDs return `exit_code = null` once the PID disappears.
+pub fn waitPid(pid: u32) !WaitPidResult {
     try validatePid(pid);
     const exec = (try platform.GetModule()).waitProcess;
     return try exec(pid);
@@ -279,9 +286,8 @@ test "forEachProcessInfo" {
     var count: usize = 0;
 
     forEachProcessInfo(allocator, &count, struct {
-        fn cb(ctx: *usize, pid: u32, name: []const u8) !void {
-            _ = pid;
-            _ = name;
+        fn cb(ctx: *usize, info: process.ProcessInfo) !void {
+            _ = info;
             ctx.* += 1;
             return Stop.Found;
         }
@@ -321,6 +327,30 @@ test "spawn + wait returns exit status" {
     const term = try child.wait();
     try std.testing.expect(term == .Exited);
     try std.testing.expectEqual(@as(u8, 7), term.Exited);
+}
+
+test "waitPid returns normalized exit info" {
+    const allocator = std.testing.allocator;
+    if (builtin.os.tag == .wasi or builtin.os.tag == .freestanding) return;
+
+    const argv = switch (builtin.os.tag) {
+        .windows => &[_][]const u8{ "cmd.exe", "/C", "exit", "7" },
+        else => &[_][]const u8{ "/bin/sh", "-c", "exit 7" },
+    };
+
+    var child = try spawn(allocator, argv, .{ .stdin = .Ignore, .stdout = .Ignore, .stderr = .Ignore, .expand_arg0 = .no_expand });
+    const pid: u32 = switch (builtin.os.tag) {
+        .windows => GetProcessId(child.id),
+        else => @intCast(child.id),
+    };
+
+    const res = try waitPid(pid);
+    try std.testing.expect(res.exited);
+    try std.testing.expectEqual(@as(?u32, 7), res.exit_code);
+
+    if (builtin.os.tag == .windows) {
+        _ = try child.wait();
+    }
 }
 
 test "exePath/cmdline/user/resourceUsage for self" {

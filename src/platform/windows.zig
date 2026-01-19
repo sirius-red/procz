@@ -279,7 +279,7 @@ pub fn forEachProcessInfo(
             if (utf8_len > 0) name_slice = utf8_buf[0..utf8_len];
         }
 
-        try callback(context, pid, name_slice);
+        try callback(context, .{ .pid = pid, .name = name_slice });
 
         if (Process32NextW(snapshot, &pe) == 0) break;
     }
@@ -526,7 +526,7 @@ pub fn userId(allocator: mem.Allocator, pid: u32) !shared.OwnedUserId {
 }
 
 /// Wait for `pid` to exit and return its exit code.
-pub fn waitProcess(pid: u32) !std.process.Child.Term {
+pub fn waitProcess(pid: u32) !shared.WaitPidResult {
     const wait_object_0: DWORD = 0x00000000;
     const infinite: DWORD = 0xFFFFFFFF;
 
@@ -553,7 +553,7 @@ pub fn waitProcess(pid: u32) !std.process.Child.Term {
         };
     }
 
-    return .{ .Exited = @intCast(exit_code & 0xFF) };
+    return .{ .exited = true, .exit_code = @intCast(exit_code) };
 }
 
 const FILETIME = extern struct {
