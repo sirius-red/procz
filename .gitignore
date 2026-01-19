@@ -1,9 +1,14 @@
+# Zig
+
 .zig-cache
 .zig-global-cache
 .zig-local-cache
 zig-out
 
-# docs build
+# Docs build
 /procz.o
 /procz.obj
 /procz.lib
+
+# Internal
+/dev
