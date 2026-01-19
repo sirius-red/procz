@@ -352,7 +352,7 @@ pub fn waitProcess(pid: u32) !shared.WaitPidResult {
     var sleep_ns: u64 = 10 * std.time.ns_per_ms;
     const max_sleep_ns: u64 = 250 * std.time.ns_per_ms;
     while (try processExists(pid)) {
-        std.time.sleep(sleep_ns);
+        std.Thread.sleep(sleep_ns);
         sleep_ns = @min(max_sleep_ns, sleep_ns * 2);
     }
 

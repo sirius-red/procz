@@ -96,6 +96,18 @@ extern "kernel32" fn GetProcessTimes(
     user_time: *FILETIME,
 ) callconv(.winapi) BOOL;
 
+const HWND = usize;
+const LPARAM = isize;
+
+extern "user32" fn EnumWindows(enum_proc: *const fn (hwnd: HWND, lparam: LPARAM) callconv(.winapi) BOOL, lparam: LPARAM) callconv(.winapi) BOOL;
+extern "user32" fn GetWindowThreadProcessId(hwnd: HWND, process_id: ?*DWORD) callconv(.winapi) DWORD;
+extern "user32" fn PostMessageW(hwnd: HWND, msg: UINT, wparam: usize, lparam: isize) callconv(.winapi) BOOL;
+
+extern "kernel32" fn AttachConsole(process_id: DWORD) callconv(.winapi) BOOL;
+extern "kernel32" fn FreeConsole() callconv(.winapi) BOOL;
+extern "kernel32" fn SetConsoleCtrlHandler(handler_routine: ?*const anyopaque, add: BOOL) callconv(.winapi) BOOL;
+extern "kernel32" fn GenerateConsoleCtrlEvent(ctrl_event: DWORD, process_group_id: DWORD) callconv(.winapi) BOOL;
+
 /// Return a slice view of a NUL-terminated UTF-16LE buffer.
 fn wideSpan(buf: *const [max_path]WCHAR) []const u16 {
     var idx: usize = 0;
@@ -312,13 +324,69 @@ pub fn killProcesses(pids: []const u32) !void {
     for (pids) |pid| try killProcess(pid);
 }
 
+fn sendWmClose(pid: u32) bool {
+    const wm_close: UINT = 0x0010;
+
+    const Ctx = struct {
+        pid: DWORD,
+        sent: bool,
+    };
+
+    var ctx = Ctx{ .pid = @intCast(pid), .sent = false };
+
+    const cb = struct {
+        fn proc(hwnd: HWND, lparam: LPARAM) callconv(.winapi) BOOL {
+            const ctx_ptr: *Ctx = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            var owner_pid: DWORD = 0;
+            _ = GetWindowThreadProcessId(hwnd, &owner_pid);
+            if (owner_pid == ctx_ptr.pid) {
+                if (PostMessageW(hwnd, wm_close, 0, 0) != 0) ctx_ptr.sent = true;
+            }
+            return 1;
+        }
+    }.proc;
+
+    _ = EnumWindows(cb, @as(LPARAM, @bitCast(@intFromPtr(&ctx))));
+    return ctx.sent;
+}
+
+fn sendConsoleCtrl(pid: u32, ctrl: DWORD) bool {
+    const ok = AttachConsole(@intCast(pid)) != 0;
+    if (!ok) return false;
+    defer _ = FreeConsole();
+
+    _ = SetConsoleCtrlHandler(null, 1);
+    defer _ = SetConsoleCtrlHandler(null, 0);
+
+    return GenerateConsoleCtrlEvent(ctrl, 0) != 0;
+}
+
+fn requestGraceful(pid: u32) bool {
+    if (sendWmClose(pid)) return true;
+    const ctrl_break_event: DWORD = 1;
+    if (sendConsoleCtrl(pid, ctrl_break_event)) return true;
+    return false;
+}
+
 /// Kill a process by PID using `KillOptions`.
 pub fn killProcessWithOptions(pid: u32, options: shared.KillOptions) !void {
-    if (options.signal) |sig| switch (sig) {
-        .term, .kill => {},
-        else => return Error.UnsupportedFeature,
+    const effective = if (options.signal) |sig| sig else switch (options.mode) {
+        .graceful => shared.Signal.term,
+        .force => shared.Signal.kill,
     };
-    return killProcess(pid);
+
+    switch (effective) {
+        .kill => return killProcess(pid),
+        .term, .hup, .quit => {
+            if (requestGraceful(pid)) return;
+            return killProcess(pid);
+        },
+        .int => {
+            const ctrl_c_event: DWORD = 0;
+            if (sendConsoleCtrl(pid, ctrl_c_event)) return;
+            return killProcess(pid);
+        },
+    }
 }
 
 /// Best-effort existence check for a PID.

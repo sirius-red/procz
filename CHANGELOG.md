@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-01-19
+
+### Added
+
+- Windows: `kill(pid, options)` now accepts the full `Signal` set and maps
+  "graceful" termination as a best-effort request (e.g. `WM_CLOSE` / console
+  control events), with `killWithTimeout` handling escalation.
+
+### Fixed
+
+- Replace `std.time.sleep` with `std.Thread.sleep` for Zig 0.15.2
+  compatibility.
+
 ## [3.0.0] - 2026-01-19
 
 ### Breaking Changes

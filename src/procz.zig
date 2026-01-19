@@ -104,7 +104,7 @@ pub fn killWithTimeout(pid: u32, options: KillOptions, timeout_ns: u64) !void {
     var timer = try std.time.Timer.start();
     while (timer.read() < timeout_ns) {
         if (!try exists(pid)) return;
-        std.time.sleep(25 * std.time.ns_per_ms);
+        std.Thread.sleep(25 * std.time.ns_per_ms);
     }
 
     if (options.mode != .force) {
@@ -115,7 +115,7 @@ pub fn killWithTimeout(pid: u32, options: KillOptions, timeout_ns: u64) !void {
         timer = try std.time.Timer.start();
         while (timer.read() < timeout_ns) {
             if (!try exists(pid)) return;
-            std.time.sleep(25 * std.time.ns_per_ms);
+            std.Thread.sleep(25 * std.time.ns_per_ms);
         }
     }
 
@@ -435,4 +435,27 @@ test "killing a reaped child returns NotFound" {
 
     if (exists(pid) catch false) return;
     try std.testing.expectError(Error.NotFound, kill(pid, .{}));
+}
+
+test "windows kill supports all signals" {
+    const allocator = std.testing.allocator;
+    if (builtin.os.tag != .windows) return;
+
+    const signals = [_]Signal{ .term, .kill, .int, .hup, .quit };
+    for (signals) |sig| {
+        const argv = &[_][]const u8{
+            "cmd.exe",
+            "/C",
+            "timeout /T 2 /NOBREAK >NUL",
+        };
+
+        var child = try spawn(allocator, argv, .{ .stdin = .Ignore, .stdout = .Ignore, .stderr = .Ignore, .expand_arg0 = .no_expand });
+        defer _ = child.wait() catch {};
+
+        const pid: u32 = @intCast(GetProcessId(child.id));
+        kill(pid, .{ .mode = .graceful, .signal = sig }) catch |err| switch (err) {
+            Error.NotFound, Error.AccessDenied => {},
+            else => return err,
+        };
+    }
 }
