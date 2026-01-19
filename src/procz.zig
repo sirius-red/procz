@@ -255,6 +255,35 @@ pub fn exePath(allocator: mem.Allocator, pid: u32) !OwnedBytes {
     return .{ .allocator = allocator, .bytes = bytes };
 }
 
+fn pathBaseName(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 0) : (end -= 1) {
+        const c = path[end - 1];
+        if (c != '/' and c != '\\') break;
+    }
+    if (end == 0) return "";
+
+    var idx: usize = end;
+    while (idx > 0) : (idx -= 1) {
+        const c = path[idx - 1];
+        if (c == '/' or c == '\\') return path[idx..end];
+    }
+    return path[0..end];
+}
+
+/// Return a canonical executable name (base name) for a PID.
+///
+/// This is the last path component of `exePath()`. On Windows, the result
+/// typically includes the `.exe` extension.
+///
+/// The returned `OwnedBytes` must be released with `deinit`.
+pub fn exeName(allocator: mem.Allocator, pid: u32) !OwnedBytes {
+    try validatePid(pid);
+    var exe = try exePath(allocator, pid);
+    defer exe.deinit();
+    return .{ .allocator = allocator, .bytes = try allocator.dupe(u8, pathBaseName(exe.bytes)) };
+}
+
 /// Return argv for a PID (UTF-8 args).
 ///
 /// The returned `OwnedArgv` must be released with `deinit`.
@@ -365,6 +394,12 @@ test "exePath/cmdline/user/resourceUsage for self" {
     var exe = try exePath(allocator, self_pid);
     defer exe.deinit();
     try std.testing.expect(exe.bytes.len > 0);
+
+    var exe_name = try exeName(allocator, self_pid);
+    defer exe_name.deinit();
+    try std.testing.expect(exe_name.bytes.len > 0);
+    try std.testing.expect(std.mem.indexOfAny(u8, exe_name.bytes, "/\\") == null);
+    try std.testing.expectEqualStrings(pathBaseName(exe.bytes), exe_name.bytes);
 
     var cl = cmdline(allocator, self_pid) catch |err| switch (err) {
         Error.UnsupportedFeature => return,
