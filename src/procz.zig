@@ -25,6 +25,8 @@ pub const KillOptions = platform.shared.KillOptions;
 pub const Signal = platform.shared.Signal;
 /// Owned byte buffer returned by some query APIs.
 pub const OwnedBytes = platform.shared.OwnedBytes;
+/// Owned argv list returned by `cmdline()`.
+pub const OwnedArgv = platform.shared.OwnedArgv;
 /// Platform-dependent user identity (uid on POSIX, SID on Windows).
 pub const UserId = platform.shared.UserId;
 /// Owned variant of `UserId` for APIs that allocate.
@@ -147,11 +149,11 @@ pub fn killTree(allocator: mem.Allocator, pid: u32, options: KillOptions) !void 
     var visited = std.AutoHashMap(u32, void).init(allocator);
     defer visited.deinit();
 
-    var stack = std.ArrayList(u32).init(allocator);
-    defer stack.deinit();
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(allocator);
 
     try visited.put(pid, {});
-    try stack.append(pid);
+    try stack.append(allocator, pid);
 
     var stack_idx: usize = 0;
     while (stack_idx < stack.items.len) : (stack_idx += 1) {
@@ -165,7 +167,7 @@ pub fn killTree(allocator: mem.Allocator, pid: u32, options: KillOptions) !void 
         for (child_pids) |child_pid| {
             if (visited.contains(child_pid)) continue;
             try visited.put(child_pid, {});
-            try stack.append(child_pid);
+            try stack.append(allocator, child_pid);
         }
     }
 
@@ -246,14 +248,13 @@ pub fn exePath(allocator: mem.Allocator, pid: u32) !OwnedBytes {
     return .{ .allocator = allocator, .bytes = bytes };
 }
 
-/// Return the command line for a PID (platform support varies).
+/// Return argv for a PID (UTF-8 args).
 ///
-/// The returned `OwnedBytes` must be released with `deinit`.
-pub fn cmdline(allocator: mem.Allocator, pid: u32) !OwnedBytes {
+/// The returned `OwnedArgv` must be released with `deinit`.
+pub fn cmdline(allocator: mem.Allocator, pid: u32) !OwnedArgv {
     try validatePid(pid);
     const exec = (try platform.GetModule()).cmdline;
-    const bytes = try exec(allocator, pid);
-    return .{ .allocator = allocator, .bytes = bytes };
+    return try exec(allocator, pid);
 }
 
 /// Return the user identity for a PID (uid on POSIX, SID on Windows).
@@ -340,6 +341,8 @@ test "exePath/cmdline/user/resourceUsage for self" {
         else => return err,
     };
     defer cl.deinit();
+    try std.testing.expect(cl.argv.len > 0);
+    try std.testing.expect(cl.argv[0].len > 0);
 
     var user_id = try user(allocator, self_pid);
     defer user_id.deinit();
@@ -352,6 +355,25 @@ test "exePath/cmdline/user/resourceUsage for self" {
     try std.testing.expect(ru.rss_bytes != null or ru.user_cpu_ns != null or ru.kernel_cpu_ns != null);
 }
 
+test "cmdline returns normalized argv for self" {
+    const allocator = std.testing.allocator;
+    if (builtin.os.tag == .wasi or builtin.os.tag == .freestanding) return;
+
+    const self_pid: u32 = switch (builtin.os.tag) {
+        .windows => @intCast(std.os.windows.GetCurrentProcessId()),
+        else => @intCast(std.posix.getpid()),
+    };
+
+    var cl = try cmdline(allocator, self_pid);
+    defer cl.deinit();
+
+    const std_argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, std_argv);
+
+    try std.testing.expectEqual(std_argv.len, cl.argv.len);
+    for (std_argv, cl.argv) |a, b| try std.testing.expectEqualStrings(a, b);
+}
+
 test "pid 0 is invalid" {
     const allocator = std.testing.allocator;
     if (builtin.os.tag == .wasi or builtin.os.tag == .freestanding) return;
@@ -360,6 +382,7 @@ test "pid 0 is invalid" {
     try std.testing.expectError(Error.InvalidPid, getProcessInfo(allocator, 0));
     try std.testing.expectError(Error.InvalidPid, kill(0, .{}));
     try std.testing.expectError(Error.InvalidPid, exePath(allocator, 0));
+    try std.testing.expectError(Error.InvalidPid, cmdline(allocator, 0));
     try std.testing.expectError(Error.InvalidPid, user(allocator, 0));
     try std.testing.expectError(Error.InvalidPid, resourceUsage(0));
 }

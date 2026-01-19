@@ -222,8 +222,8 @@ pub fn childrenPids(allocator: mem.Allocator, pid: u32) ![]u32 {
     const count = size / @sizeOf(c_api.struct_kinfo_proc);
     const procs: [*]c_api.struct_kinfo_proc = @ptrCast(@alignCast(buf.ptr));
 
-    var list = std.ArrayList(u32).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(u32) = .empty;
+    errdefer list.deinit(allocator);
 
     var proc_idx: usize = 0;
     while (proc_idx < count) : (proc_idx += 1) {
@@ -231,10 +231,10 @@ pub fn childrenPids(allocator: mem.Allocator, pid: u32) ![]u32 {
         const pid_i32: i32 = @intCast(kp.kp_proc.p_pid);
         if (pid_i32 <= 0) continue;
         const ppid: u32 = @intCast(kp.kp_eproc.e_ppid);
-        if (ppid == pid) try list.append(@intCast(pid_i32));
+        if (ppid == pid) try list.append(allocator, @intCast(pid_i32));
     }
 
-    return try list.toOwnedSlice();
+    return try list.toOwnedSlice(allocator);
 }
 
 /// Return the executable path for `pid`.
@@ -251,19 +251,22 @@ pub fn exePath(allocator: mem.Allocator, pid: u32) ![]u8 {
 }
 
 /// Return the command line for `pid`.
-pub fn cmdline(allocator: mem.Allocator, pid: u32) ![]u8 {
+pub fn cmdline(allocator: mem.Allocator, pid: u32) !shared.OwnedArgv {
     _ = try toPidT(pid);
     const c_api = @cImport({
         @cInclude("sys/types.h");
         @cInclude("sys/sysctl.h");
     });
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
     var mib = [_]c_int{ c_api.CTL_KERN, c_api.KERN_PROCARGS2, @intCast(pid) };
     var size: usize = 0;
     try sysctlCheck(c_api.sysctl(&mib, mib.len, null, &size, null, 0));
 
-    const buf = try allocator.alloc(u8, size);
-    defer allocator.free(buf);
+    const buf = try a.alloc(u8, size);
 
     try sysctlCheck(c_api.sysctl(&mib, mib.len, buf.ptr, &size, null, 0));
     if (size < @sizeOf(c_int)) return Error.Unexpected;
@@ -275,22 +278,19 @@ pub fn cmdline(allocator: mem.Allocator, pid: u32) ![]u8 {
     while (idx < size and buf[idx] != 0) : (idx += 1) {}
     while (idx < size and buf[idx] == 0) : (idx += 1) {}
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var argv: std.ArrayList([]const u8) = .empty;
 
     var arg_idx: c_int = 0;
     while (arg_idx < argc and idx < size) : (arg_idx += 1) {
         const start = idx;
         while (idx < size and buf[idx] != 0) : (idx += 1) {}
         const arg = buf[start..idx];
-        if (arg.len != 0) {
-            if (out.items.len != 0) try out.append(' ');
-            try out.appendSlice(arg);
-        }
+        try argv.append(a, try a.dupe(u8, arg));
         while (idx < size and buf[idx] == 0) : (idx += 1) {}
     }
 
-    return try out.toOwnedSlice();
+    if (arg_idx != argc) return Error.Unexpected;
+    return .{ .arena = arena, .argv = try argv.toOwnedSlice(a) };
 }
 
 /// Return the user identity (uid) for `pid`.

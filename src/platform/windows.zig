@@ -52,11 +52,30 @@ extern "kernel32" fn OpenProcess(desired_access: DWORD, inherit_handle: BOOL, pr
 extern "kernel32" fn TerminateProcess(process_handle: HANDLE, exit_code: UINT) callconv(.winapi) BOOL;
 extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
 extern "kernel32" fn QueryFullProcessImageNameW(process_handle: HANDLE, flags: DWORD, exe_name: [*]WCHAR, exe_name_size: *DWORD) callconv(.winapi) BOOL;
+extern "kernel32" fn ReadProcessMemory(
+    process_handle: HANDLE,
+    base_address: *const anyopaque,
+    buffer: *anyopaque,
+    size: usize,
+    bytes_read: ?*usize,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn IsWow64Process(process_handle: HANDLE, wow64_process: *BOOL) callconv(.winapi) BOOL;
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
 extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 extern "kernel32" fn GetCommandLineW() callconv(.winapi) [*:0]const WCHAR;
 extern "kernel32" fn WaitForSingleObject(handle: HANDLE, milliseconds: DWORD) callconv(.winapi) DWORD;
 extern "kernel32" fn GetExitCodeProcess(process_handle: HANDLE, exit_code: *DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn LocalFree(mem: LPVOID) callconv(.winapi) LPVOID;
+
+extern "shell32" fn CommandLineToArgvW(cmdline: [*:0]const WCHAR, argc: *c_int) callconv(.winapi) ?[*][*:0]WCHAR;
+
+extern "ntdll" fn NtQueryInformationProcess(
+    process_handle: HANDLE,
+    process_information_class: ULONG,
+    process_information: *anyopaque,
+    process_information_length: ULONG,
+    return_length: ?*ULONG,
+) callconv(.winapi) i32;
 
 extern "advapi32" fn OpenProcessToken(process_handle: HANDLE, desired_access: DWORD, token_handle: *HANDLE) callconv(.winapi) BOOL;
 extern "advapi32" fn GetTokenInformation(
@@ -87,6 +106,135 @@ fn wideSpan(buf: *const [max_path]WCHAR) []const u16 {
 fn validatePid(pid: u32) Error!DWORD {
     if (pid == 0) return Error.InvalidPid;
     return @intCast(pid);
+}
+
+const PROCESS_BASIC_INFORMATION = extern struct {
+    reserved1: LPVOID,
+    peb_base_address: LPVOID,
+    reserved2: [2]LPVOID,
+    unique_process_id: LPVOID,
+    reserved3: LPVOID,
+};
+
+const UNICODE_STRING = extern struct {
+    length: u16,
+    maximum_length: u16,
+    buffer: LPVOID,
+};
+
+const PEB = extern struct {
+    reserved1: [2]u8,
+    being_debugged: u8,
+    reserved2: [1]u8,
+    reserved3: [2]LPVOID,
+    ldr: LPVOID,
+    process_parameters: LPVOID,
+};
+
+const RTL_USER_PROCESS_PARAMETERS = extern struct {
+    reserved1: [16]u8,
+    reserved2: [10]LPVOID,
+    image_path_name: UNICODE_STRING,
+    command_line: UNICODE_STRING,
+};
+
+fn isWow64(handle: HANDLE) bool {
+    var wow64: BOOL = 0;
+    if (IsWow64Process(handle, &wow64) == 0) return false;
+    return wow64 != 0;
+}
+
+fn readRemote(handle: HANDLE, remote_addr: *const anyopaque, out: []u8) Error!void {
+    var bytes_read: usize = 0;
+    const ok = ReadProcessMemory(handle, remote_addr, @ptrCast(out.ptr), out.len, &bytes_read) != 0;
+    if (!ok or bytes_read != out.len) {
+        return switch (GetLastError()) {
+            win_error_invalid_parameter => Error.NotFound,
+            win_error_invalid_handle => Error.NotFound,
+            win_error_access_denied => Error.AccessDenied,
+            else => Error.Unexpected,
+        };
+    }
+}
+
+fn cmdlineWideForPid(allocator: mem.Allocator, pid: u32) ![]WCHAR {
+    if (pid == GetCurrentProcessId()) {
+        const wide = std.mem.span(GetCommandLineW());
+        const out = try allocator.alloc(WCHAR, wide.len + 1);
+        std.mem.copyForwards(WCHAR, out[0..wide.len], wide);
+        out[wide.len] = 0;
+        return out;
+    }
+
+    const pid_dword = try validatePid(pid);
+    const handle = OpenProcess(process_query_limited_information | process_vm_read, 0, pid_dword);
+    if (handle == 0) {
+        return switch (GetLastError()) {
+            win_error_invalid_parameter => Error.NotFound,
+            win_error_access_denied => Error.AccessDenied,
+            else => Error.Unexpected,
+        };
+    }
+    defer _ = CloseHandle(handle);
+
+    const cur_wow64 = isWow64(GetCurrentProcess());
+    const target_wow64 = isWow64(handle);
+    if (@sizeOf(usize) == 8 and target_wow64) return Error.UnsupportedFeature;
+    if (@sizeOf(usize) == 4 and cur_wow64 and !target_wow64) return Error.UnsupportedFeature;
+
+    const process_basic_information: ULONG = 0;
+    var pbi: PROCESS_BASIC_INFORMATION = undefined;
+    var ret_len: ULONG = 0;
+    const nt_rc = NtQueryInformationProcess(
+        handle,
+        process_basic_information,
+        @ptrCast(&pbi),
+        @intCast(@sizeOf(PROCESS_BASIC_INFORMATION)),
+        &ret_len,
+    );
+    if (nt_rc != 0 or pbi.peb_base_address == null) return Error.Unexpected;
+
+    var peb: PEB = undefined;
+    try readRemote(handle, @ptrCast(pbi.peb_base_address.?), std.mem.asBytes(&peb));
+    if (peb.process_parameters == null) return Error.Unexpected;
+
+    var params: RTL_USER_PROCESS_PARAMETERS = undefined;
+    try readRemote(handle, @ptrCast(peb.process_parameters.?), std.mem.asBytes(&params));
+    if (params.command_line.buffer == null) return Error.Unexpected;
+
+    const len_bytes: usize = @intCast(params.command_line.length);
+    if (len_bytes % @sizeOf(WCHAR) != 0) return Error.Unexpected;
+    const wide_len: usize = len_bytes / @sizeOf(WCHAR);
+
+    const out = try allocator.alloc(WCHAR, wide_len + 1);
+    errdefer allocator.free(out);
+
+    try readRemote(handle, @ptrCast(params.command_line.buffer.?), std.mem.sliceAsBytes(out[0..wide_len]));
+    out[wide_len] = 0;
+    return out;
+}
+
+fn cmdlineArgvFromWide(allocator: mem.Allocator, wide_cmdline: [*:0]const WCHAR) !shared.OwnedArgv {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    var argc: c_int = 0;
+    const argv_w = CommandLineToArgvW(wide_cmdline, &argc) orelse return Error.Unexpected;
+    defer _ = LocalFree(@ptrCast(argv_w));
+    if (argc < 0) return Error.Unexpected;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.ensureTotalCapacity(a, @intCast(argc));
+
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(argc))) : (i += 1) {
+        const arg_w = std.mem.span(argv_w[i]);
+        const arg = try std.unicode.utf16LeToUtf8Alloc(a, arg_w);
+        try argv.append(a, arg);
+    }
+
+    return .{ .arena = arena, .argv = try argv.toOwnedSlice(a) };
 }
 
 /// Enumerate process IDs and names on Windows using Tool Help snapshots.
@@ -271,15 +419,15 @@ pub fn childrenPids(allocator: mem.Allocator, pid: u32) ![]u32 {
         };
     }
 
-    var list = std.ArrayList(u32).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(u32) = .empty;
+    errdefer list.deinit(allocator);
 
     while (true) {
-        if (pe.th32_parent_process_id == pid) try list.append(pe.th32_process_id);
+        if (pe.th32_parent_process_id == pid) try list.append(allocator, pe.th32_process_id);
         if (Process32NextW(snapshot, &pe) == 0) break;
     }
 
-    return try list.toOwnedSlice();
+    return try list.toOwnedSlice(allocator);
 }
 
 /// Return the executable path for `pid`.
@@ -309,12 +457,15 @@ pub fn exePath(allocator: mem.Allocator, pid: u32) ![]u8 {
     return std.unicode.utf16LeToUtf8Alloc(allocator, wide_buf[0..@intCast(size)]);
 }
 
-/// Return the command line for `pid` (only supported for the current process).
-pub fn cmdline(allocator: mem.Allocator, pid: u32) ![]u8 {
+/// Return the command line argv for `pid`.
+///
+/// Note: Windows does not store argv directly; this uses a best-effort parsing
+/// of the target process command line string.
+pub fn cmdline(allocator: mem.Allocator, pid: u32) !shared.OwnedArgv {
     _ = try validatePid(pid);
-    if (pid != GetCurrentProcessId()) return Error.UnsupportedFeature;
-    const wide = std.mem.span(GetCommandLineW());
-    return std.unicode.utf16LeToUtf8Alloc(allocator, wide);
+    const wide = try cmdlineWideForPid(allocator, pid);
+    defer allocator.free(wide);
+    return try cmdlineArgvFromWide(allocator, @ptrCast(wide.ptr));
 }
 
 /// Return the user identity (SID string) for `pid`.

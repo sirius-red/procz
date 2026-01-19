@@ -207,18 +207,18 @@ pub fn childrenPids(allocator: mem.Allocator, pid: u32) ![]u32 {
     defer proc_dir.close();
 
     var proc_iter = proc_dir.iterate();
-    var list = std.ArrayList(u32).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(u32) = .empty;
+    errdefer list.deinit(allocator);
 
     while (true) {
         const entry = (try nextProcEntry(&proc_iter)) orelse break;
         if (entry.kind != .directory) continue;
         const child_pid = std.fmt.parseUnsigned(u32, entry.name, 10) catch continue;
         const parent_pid = parentPid(child_pid) catch continue;
-        if (parent_pid != null and parent_pid.? == pid) try list.append(child_pid);
+        if (parent_pid != null and parent_pid.? == pid) try list.append(allocator, child_pid);
     }
 
-    return try list.toOwnedSlice();
+    return try list.toOwnedSlice(allocator);
 }
 
 /// Return the executable path for `pid`.
@@ -237,7 +237,7 @@ pub fn exePath(allocator: mem.Allocator, pid: u32) ![]u8 {
 }
 
 /// Return the command line for `pid`.
-pub fn cmdline(allocator: mem.Allocator, pid: u32) ![]u8 {
+pub fn cmdline(allocator: mem.Allocator, pid: u32) !shared.OwnedArgv {
     var path_buf: [64]u8 = undefined;
     const path = try procFilePath(&path_buf, pid, "cmdline");
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
@@ -247,19 +247,29 @@ pub fn cmdline(allocator: mem.Allocator, pid: u32) ![]u8 {
     };
     defer file.close();
 
-    const raw = try file.readToEndAlloc(allocator, 1024 * 1024);
-    errdefer allocator.free(raw);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    const raw = try file.readToEndAlloc(a, 1024 * 1024);
 
     var end = raw.len;
     while (end > 0 and raw[end - 1] == 0) : (end -= 1) {}
-    for (raw[0..end]) |*byte_ptr| {
-        if (byte_ptr.* == 0) byte_ptr.* = ' ';
+
+    var args: std.ArrayList([]const u8) = .empty;
+
+    var idx: usize = 0;
+    while (idx < end) {
+        const start = idx;
+        while (idx < end and raw[idx] != 0) : (idx += 1) {}
+        const arg = raw[start..idx];
+        try args.append(a, try a.dupe(u8, arg));
+
+        if (idx == end) break;
+        idx += 1; // skip NUL separator
     }
 
-    const trimmed = std.mem.trimRight(u8, raw[0..end], " ");
-    const out = try allocator.dupe(u8, trimmed);
-    allocator.free(raw);
-    return out;
+    return .{ .arena = arena, .argv = try args.toOwnedSlice(a) };
 }
 
 /// Return the user identity (uid) for `pid`.

@@ -68,6 +68,20 @@ pub const OwnedBytes = struct {
     }
 };
 
+/// Owned argv list returned by `cmdline()`.
+///
+/// The argv slices are UTF-8 and allocated from `arena`.
+pub const OwnedArgv = struct {
+    arena: std.heap.ArenaAllocator,
+    argv: []const []const u8,
+
+    /// Release all memory associated with this argv list.
+    pub fn deinit(self: *OwnedArgv) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Platform-dependent user identity.
 pub const UserId = union(enum) {
     /// POSIX user id.
