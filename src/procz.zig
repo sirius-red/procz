@@ -300,6 +300,25 @@ pub fn user(allocator: mem.Allocator, pid: u32) !OwnedUserId {
     return try exec(allocator, pid);
 }
 
+/// Return a normalized user identity for a PID.
+///
+/// The normalized representation is intended to be comparable across OSes:
+/// - POSIX: `uid:<number>`
+/// - Windows: `sid:<sid-string>`
+///
+/// The returned `OwnedBytes` must be released with `deinit`.
+pub fn userNormalized(allocator: mem.Allocator, pid: u32) !OwnedBytes {
+    try validatePid(pid);
+    var id = try user(allocator, pid);
+    defer id.deinit();
+
+    const out = switch (id.id) {
+        .uid => |uid| try std.fmt.allocPrint(allocator, "uid:{d}", .{uid}),
+        .sid => |sid| try std.fmt.allocPrint(allocator, "sid:{s}", .{sid}),
+    };
+    return .{ .allocator = allocator, .bytes = out };
+}
+
 /// Return resource usage for a PID (best-effort, fields may be null).
 pub fn resourceUsage(pid: u32) !ResourceUsage {
     try validatePid(pid);
@@ -415,6 +434,14 @@ test "exePath/cmdline/user/resourceUsage for self" {
         .uid => |uid| try std.testing.expect(uid >= 0),
         .sid => |sid| try std.testing.expect(sid.len > 0),
     }
+
+    var norm_user = try userNormalized(allocator, self_pid);
+    defer norm_user.deinit();
+    try std.testing.expect(norm_user.bytes.len > 0);
+    try std.testing.expect(
+        std.mem.startsWith(u8, norm_user.bytes, "uid:") or
+            std.mem.startsWith(u8, norm_user.bytes, "sid:"),
+    );
 
     const ru = try resourceUsage(self_pid);
     try std.testing.expect(ru.rss_bytes != null or ru.user_cpu_ns != null or ru.kernel_cpu_ns != null);
