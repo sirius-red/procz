@@ -11,4 +11,4 @@ Cross-platform library for handling processes with Zig (0.15.2+).
 - [x] `exePath()`: provide a normalized "exe name" story (path is always OS-native).
 - [x] `user()`: normalize user identity output so it's comparable across OSes.
 - [x] `resourceUsage()`: pick a single time base for `start_time_*`.
-- [ ] `children()` / `killTree()`: make results deterministic (stable ordering).
+- [x] `children()` / `killTree()`: make results deterministic (stable ordering).

@@ -136,11 +136,14 @@ pub fn parent(pid: u32) !?u32 {
 
 /// Return the list of child PIDs for `pid`.
 ///
-/// The returned slice is owned by the caller and must be freed with `allocator.free`.
+/// The returned slice is sorted in ascending PID order, owned by the caller,
+/// and must be freed with `allocator.free`.
 pub fn children(allocator: mem.Allocator, pid: u32) ![]u32 {
     try validatePid(pid);
     const exec = (try platform.GetModule()).childrenPids;
-    return try exec(allocator, pid);
+    const pids = try exec(allocator, pid);
+    std.sort.heap(u32, pids, {}, std.sort.asc(u32));
+    return pids;
 }
 
 /// Attempt to kill `pid` and all of its descendants (best-effort).
@@ -503,6 +506,12 @@ test "killing a reaped child returns NotFound" {
 
     if (exists(pid) catch false) return;
     try std.testing.expectError(Error.NotFound, kill(pid, .{}));
+}
+
+test "children pid list is deterministic (sorted)" {
+    var pids = [_]u32{ 10, 2, 7, 7, 3 };
+    std.sort.heap(u32, pids[0..], {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 2, 3, 7, 7, 10 }, pids[0..]);
 }
 
 test "windows kill supports all signals" {
