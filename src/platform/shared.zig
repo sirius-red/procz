@@ -124,6 +124,13 @@ pub const ResourceUsage = struct {
     vms_bytes: ?u64 = null,
     user_cpu_ns: ?u64 = null,
     kernel_cpu_ns: ?u64 = null,
+    /// Platform-specific process start time.
+    ///
+    /// - Windows: unix epoch nanoseconds
+    /// - Linux: nanoseconds since boot
+    /// - macOS: mach absolute time units
     start_time_ns: ?u64 = null,
+    /// Normalized process start time, when available (unix epoch nanoseconds).
+    start_time_unix_ns: ?u64 = null,
     start_time_is_unix_epoch: bool = false,
 };

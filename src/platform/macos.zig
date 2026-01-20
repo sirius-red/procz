@@ -370,12 +370,48 @@ pub fn resourceUsage(pid: u32) !shared.ResourceUsage {
     const result_code: c_int = c_api.proc_pid_rusage(@intCast(pid), c_api.RUSAGE_INFO_V2, &info);
     if (result_code != 0) return errnoToError(posix.errno(result_code));
 
+    const start_unix_ns: ?u64 = blk: {
+        const sysctl_api = @cImport({
+            @cInclude("sys/types.h");
+            @cInclude("sys/sysctl.h");
+            @cInclude("sys/time.h");
+        });
+        const mach_api = @cImport({
+            @cInclude("mach/mach_time.h");
+        });
+
+        var mib = [_]c_int{ sysctl_api.CTL_KERN, sysctl_api.KERN_BOOTTIME };
+        var tv: sysctl_api.timeval = undefined;
+        var tv_size: usize = @sizeOf(sysctl_api.timeval);
+        sysctlCheck(sysctl_api.sysctl(&mib, mib.len, &tv, &tv_size, null, 0)) catch break :blk null;
+        if (tv_size != @sizeOf(sysctl_api.timeval)) break :blk null;
+
+        if (tv.tv_sec < 0 or tv.tv_usec < 0) break :blk null;
+        const boot_unix_ns: u64 = (@as(u64, @intCast(tv.tv_sec)) * std.time.ns_per_s) +
+            (@as(u64, @intCast(tv.tv_usec)) * std.time.ns_per_us);
+
+        var timebase: mach_api.mach_timebase_info_data_t = undefined;
+        if (mach_api.mach_timebase_info(&timebase) != 0) break :blk null;
+        if (timebase.denom == 0) break :blk null;
+
+        const abs: u64 = @intCast(info.ri_proc_start_abstime);
+        const ns_since_boot_u128: u128 = (@as(u128, abs) * @as(u128, timebase.numer)) / @as(u128, timebase.denom);
+        const ns_since_boot: u64 = if (ns_since_boot_u128 > std.math.maxInt(u64))
+            break :blk null
+        else
+            @intCast(ns_since_boot_u128);
+
+        const start_u128: u128 = @as(u128, boot_unix_ns) + @as(u128, ns_since_boot);
+        break :blk if (start_u128 > std.math.maxInt(u64)) null else @intCast(start_u128);
+    };
+
     return .{
         .rss_bytes = info.ri_resident_size,
         .vms_bytes = info.ri_virtual_size,
         .user_cpu_ns = info.ri_user_time,
         .kernel_cpu_ns = info.ri_system_time,
         .start_time_ns = info.ri_proc_start_abstime,
+        .start_time_unix_ns = start_unix_ns,
         .start_time_is_unix_epoch = false,
     };
 }

@@ -684,6 +684,7 @@ pub fn resourceUsage(pid: u32) !shared.ResourceUsage {
         .user_cpu_ns = filetimeToU64(user) * 100,
         .kernel_cpu_ns = filetimeToU64(kernel) * 100,
         .start_time_ns = unix_100ns * 100,
+        .start_time_unix_ns = unix_100ns * 100,
         .start_time_is_unix_epoch = true,
     };
 }

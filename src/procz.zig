@@ -445,6 +445,12 @@ test "exePath/cmdline/user/resourceUsage for self" {
 
     const ru = try resourceUsage(self_pid);
     try std.testing.expect(ru.rss_bytes != null or ru.user_cpu_ns != null or ru.kernel_cpu_ns != null);
+    if (ru.start_time_is_unix_epoch) {
+        try std.testing.expect(ru.start_time_unix_ns != null);
+        try std.testing.expectEqual(ru.start_time_ns, ru.start_time_unix_ns);
+    } else {
+        if (ru.start_time_unix_ns) |ts| try std.testing.expect(ts > std.time.ns_per_s);
+    }
 }
 
 test "cmdline returns normalized argv for self" {

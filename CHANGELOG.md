@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-01-19
+
+### Changed
+
+- `resourceUsage()` now also provides `start_time_unix_ns` (unix epoch
+  nanoseconds) when available, while keeping platform-specific
+  `start_time_ns`.
+
 ## [3.3.0] - 2026-01-19
 
 ### Added

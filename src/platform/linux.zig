@@ -118,6 +118,31 @@ fn procFilePath(buf: []u8, pid: u32, leaf: []const u8) Error![]const u8 {
     return std.fmt.bufPrint(buf, "/proc/{d}/{s}", .{ pid, leaf }) catch Error.Unexpected;
 }
 
+fn bootTimeUnixNs() !u64 {
+    const file = std.fs.openFileAbsolute("/proc/stat", .{}) catch |err| switch (err) {
+        error.FileNotFound => return Error.NotFound,
+        error.AccessDenied => return Error.AccessDenied,
+        else => return Error.Unexpected,
+    };
+    defer file.close();
+
+    var buf: [8192]u8 = undefined;
+    const bytes_read = file.readAll(&buf) catch return Error.Unexpected;
+    const contents = buf[0..bytes_read];
+
+    var line_it = std.mem.tokenizeScalar(u8, contents, '\n');
+    while (line_it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "btime")) continue;
+        var tok_it = std.mem.tokenizeAny(u8, line, " \t");
+        _ = tok_it.next();
+        const sec_str = tok_it.next() orelse return Error.Unexpected;
+        const sec = std.fmt.parseUnsigned(u64, sec_str, 10) catch return Error.Unexpected;
+        return sec * std.time.ns_per_s;
+    }
+
+    return Error.Unexpected;
+}
+
 /// Best-effort existence check for a PID.
 pub fn processExists(pid: u32) !bool {
     var path_buf: [64]u8 = undefined;
@@ -352,11 +377,15 @@ pub fn resourceUsage(pid: u32) !shared.ResourceUsage {
     const start_ns = (fields.starttime * 1_000_000_000) / tck;
     const rss_bytes = if (fields.rss_pages <= 0) @as(u64, 0) else @as(u64, @intCast(fields.rss_pages)) * ps;
 
+    const boot_unix_ns: ?u64 = bootTimeUnixNs() catch null;
+    const start_unix_ns: ?u64 = if (boot_unix_ns) |boot| boot + start_ns else null;
+
     return .{
         .rss_bytes = rss_bytes,
         .user_cpu_ns = user_ns,
         .kernel_cpu_ns = kernel_ns,
         .start_time_ns = start_ns,
+        .start_time_unix_ns = start_unix_ns,
         .start_time_is_unix_epoch = false,
     };
 }
